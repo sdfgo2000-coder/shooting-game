@@ -93,6 +93,13 @@
   #btnScope { width:58px; height:58px; right:calc(128px + env(safe-area-inset-right));
               bottom:calc(186px + env(safe-area-inset-bottom)); font-size:11px; display:none;
               background:rgba(80,160,255,.18); border-color:rgba(100,180,255,.5); }
+  #btnJump { width:64px; height:64px; right:calc(206px + env(safe-area-inset-right));
+             bottom:calc(52px + env(safe-area-inset-bottom)); font-size:12px;
+             background:rgba(90,220,255,.14); border-color:rgba(120,220,255,.5); }
+  #btnSlide { width:58px; height:58px; right:calc(212px + env(safe-area-inset-right));
+              bottom:calc(132px + env(safe-area-inset-bottom)); font-size:11px;
+              background:rgba(255,140,255,.13); border-color:rgba(255,150,255,.45); }
+  #btnSlide.cd { opacity:.4; }
   /* ---------- 오버레이 ---------- */
   .overlay { position:fixed; inset:0; z-index:30; display:flex; flex-direction:column;
              align-items:center; justify-content:center; text-align:center;
@@ -150,6 +157,8 @@
   <div id="btnGrenade" class="ctlbtn">수류탄<small id="grenCount">3</small></div>
   <div id="btnWeapon" class="ctlbtn"><small>무기</small><span id="wpnLabel">소총</span></div>
   <div id="btnScope" class="ctlbtn">조준경</div>
+  <div id="btnJump" class="ctlbtn">점프</div>
+  <div id="btnSlide" class="ctlbtn">슬라이딩</div>
 </div>
 
 <div id="start" class="overlay">
@@ -158,8 +167,8 @@
   <div class="help">
     <b>모바일:</b> 왼쪽 드래그 = 이동 · 오른쪽 드래그 = 조준 · <b>발사</b> 꾹 = 연사<br>
     <b>무기</b> 버튼 = 소총↔저격총 · 저격총은 <b>조준경</b> 버튼으로 줌<br>
-    <b>수류탄</b> 버튼 = 투척 (폭발 범위 피해!)<br>
-    <b>PC:</b> WASD 이동 · 마우스 조준 · 클릭 발사 · <b>1/2</b> 무기 · <b>G</b> 수류탄 · <b>우클릭</b> 조준경 · R 재장전<br>
+    <b>수류탄</b> 버튼 = 투척 · <b>점프</b>/<b>슬라이딩</b> 버튼으로 회피 기동!<br>
+    <b>PC:</b> WASD 이동 · 마우스 조준 · 클릭 발사 · <b>1/2</b> 무기 · <b>G</b> 수류탄 · <b>우클릭</b> 조준경 · R 재장전 · <b>Space</b> 점프 · <b>Shift/C</b> 슬라이딩<br>
     파란 군복의 <b>아군 분대원</b>과 함께 적 웨이브를 막아내세요!
   </div>
   <button id="btnStart" class="bigbtn">게임 시작</button>
@@ -400,6 +409,9 @@ const sfx = {
   medkit:     () => playTone(500, 900, 0.2, 0.3, 'sine'),
   wave:       () => { playTone(200,400,0.4,0.3,'sawtooth'); setTimeout(()=>playTone(300,600,0.4,0.3,'sawtooth'),200); },
   swap:       () => playTone(700, 500, 0.08, 0.25, 'square'),
+  jump:       () => playTone(280, 460, 0.14, 0.2, 'sine'),
+  land:       () => playTone(190, 110, 0.09, 0.28, 'triangle'),
+  slide:      () => playShot(0.18, 350, 0.35),
   throwG:     () => playTone(280, 480, 0.12, 0.2, 'sine'),
   bounce:     () => playTone(650, 350, 0.05, 0.18, 'square'),
   boom:       () => { playShot(0.9, 320, 0.55); playTone(110, 26, 0.5, 0.7, 'sine'); },
@@ -423,8 +435,11 @@ const player = {
   grenades:3, grenCd:0, scoped:false,
   reloading:0, fireCd:0,
   bob:0, bobT:0, recoil:0,
+  z:0, vz:0, grounded:true,                    // 점프 (벽높이 단위)
+  slideT:0, slideCd:0, slideVx:0, slideVy:0,   // 슬라이딩
   moving:false, dead:false,
 };
+const SLIDE_DUR = 0.7, SLIDE_CD = 1.5;
 let enemies = [];
 let allies = [];
 let pickups = [];
@@ -603,6 +618,7 @@ function updateEnemies(dt){
       sfx.enemyShoot();
       const targetMoving = tAlly ? true : player.moving;
       let acc = 0.75 - tdist*0.035 - (targetMoving ? 0.22 : 0);
+      if (!tAlly && (player.slideT > 0 || !player.grounded)) acc -= 0.25;  // 회피 기동 보너스
       if (Math.random() < Math.max(0.12, acc)){
         const dmg = 7 + Math.random()*8 + wave;
         if (tAlly){
@@ -807,6 +823,34 @@ function explode(x, y){
   }
 }
 
+/* ---------- 점프 / 슬라이딩 ---------- */
+function doJump(){
+  if (state !== 'playing' || player.dead || !player.grounded) return;
+  player.grounded = false;
+  player.vz = 2.3;
+  player.slideT = 0;            // 점프하면 슬라이딩 취소
+  sfx.jump();
+}
+function doSlide(){
+  if (state !== 'playing' || player.dead || !player.grounded
+      || player.slideCd > 0 || player.slideT > 0) return;
+  // 현재 이동 방향으로 슬라이딩, 정지 상태면 정면으로
+  let fw = 0, st = 0;
+  if (keys.KeyW || keys.ArrowUp) fw += 1;
+  if (keys.KeyS || keys.ArrowDown) fw -= 1;
+  if (keys.KeyA) st -= 1;
+  if (keys.KeyD) st += 1;
+  fw += -stick.dy; st += stick.dx;
+  const len = Math.hypot(fw, st);
+  if (len > 0.1){ fw/=len; st/=len; } else { fw = 1; st = 0; }
+  player.slideVx = Math.cos(player.dir)*fw - Math.sin(player.dir)*st;
+  player.slideVy = Math.sin(player.dir)*fw + Math.cos(player.dir)*st;
+  player.slideT = SLIDE_DUR;
+  player.slideCd = SLIDE_CD;
+  setScoped(false);
+  sfx.slide();
+}
+
 /* ---------- 입력 ---------- */
 const keys = {};
 let fireHeld = false;
@@ -816,6 +860,8 @@ addEventListener('keydown', e => {
   if (e.code === 'KeyG') throwGrenade();
   if (e.code === 'Digit1') switchWeapon('rifle');
   if (e.code === 'Digit2') switchWeapon('sniper');
+  if (e.code === 'Space'){ e.preventDefault(); doJump(); }
+  if (e.code === 'KeyC' || e.code === 'ShiftLeft') doSlide();
 });
 addEventListener('keyup', e => keys[e.code] = false);
 
@@ -902,6 +948,8 @@ bindBtn('btnReload', () => startReload());
 bindBtn('btnGrenade',() => throwGrenade());
 bindBtn('btnWeapon', () => switchWeapon());
 bindBtn('btnScope',  () => setScoped(!player.scoped));
+bindBtn('btnJump',   () => doJump());
+bindBtn('btnSlide',  () => doSlide());
 
 /* ---------- HUD ---------- */
 function updateHUD(){
@@ -931,6 +979,10 @@ function render(){
   const horizon = H/2 + player.pitch + Math.sin(player.bobT*9)*player.bob*3
                 + (shake > 0 ? (Math.random()-.5)*shake : 0);
   const shakeX = shake > 0 ? (Math.random()-.5)*shake : 0;
+  // 카메라 높이: 기본 0.5 + 점프 높이 - 슬라이딩 자세
+  const slideK = player.slideT > 0
+    ? Math.min(1, (SLIDE_DUR - player.slideT)/0.12, player.slideT/0.15) : 0;
+  const camZ = 0.5 + player.z - 0.22*slideK;
 
   // 하늘/바닥
   const skyGrad = ctx.createLinearGradient(0,0,0,horizon);
@@ -962,7 +1014,7 @@ function render(){
     wallX -= wallX|0;
     let texX = wallX*TEX|0;
     if ((side===0 && rdx>0) || (side===1 && rdy<0)) texX = TEX-1-texX;
-    const y0 = horizon - lineH/2;
+    const y0 = horizon + lineH*(camZ-1);
     const tex = textures[tile] || textures[1];
     ctx.drawImage(tex, texX, 0, 1, TEX, x+shakeX, y0, 1, lineH);
     let sh = Math.min(0.75, dist*0.05) + (side===1 ? 0.14 : 0);
@@ -996,7 +1048,7 @@ function render(){
     if (s.kind === 'gren'){
       if (s.ty >= zbuf[colC]) continue;
       const r = Math.max(1.5, lineH*0.05);
-      const gy = horizon + lineH*(0.5 - s.e.z*0.55);
+      const gy = horizon + lineH*(camZ - s.e.z*0.55);
       ctx.fillStyle = '#2e4428';
       ctx.beginPath(); ctx.arc(scrX, gy, r, 0, Math.PI*2); ctx.fill();
       ctx.fillStyle = 'rgba(255,255,255,.35)';
@@ -1008,7 +1060,7 @@ function render(){
       const t = s.e.t/0.5;
       const rw = 0.5 + 2.3*t;
       const rs = lineH * rw * 0.5;
-      const gy = horizon + lineH*(0.5 - 0.3);
+      const gy = horizon + lineH*(camZ - 0.3);
       const grad = ctx.createRadialGradient(scrX, gy, rs*0.1, scrX, gy, rs);
       grad.addColorStop(0, `rgba(255,250,215,${(1-t)*0.95})`);
       grad.addColorStop(0.45, `rgba(255,170,60,${(1-t)*0.8})`);
@@ -1036,7 +1088,7 @@ function render(){
       img = SPR.medkit; sprH *= 0.4; sprW = sprH;
     }
     const h = sprH*squash;
-    const y0 = horizon + Math.abs(lineH)/2 - h;
+    const y0 = horizon + Math.abs(lineH)*camZ - h;
     const x0 = scrX - sprW/2;
     const step = 2;
     const sw = img.width;
@@ -1065,7 +1117,7 @@ function render(){
     }
   }
 
-  if (!player.scoped) renderGun(horizon);
+  if (!player.scoped) renderGun(horizon, slideK);
 
   if (flashRed > 0){
     ctx.fillStyle = `rgba(200,0,0,${flashRed*0.28})`;
@@ -1074,11 +1126,11 @@ function render(){
   renderMinimap();
 }
 
-function renderGun(horizon){
+function renderGun(horizon, slideK){
   const bobX = Math.sin(player.bobT*9)*player.bob*5;
   const bobY = Math.abs(Math.cos(player.bobT*9))*player.bob*4;
   const sniper = player.weapon === 'sniper';
-  let gy = H - H*0.30 + bobY + player.recoil*(sniper?16:10);
+  let gy = H - H*0.30 + bobY + player.recoil*(sniper?16:10) + slideK*H*0.06;
   let gx = W*0.62 + bobX;
   if (player.reloading > 0){
     const t = 1 - player.reloading/curWeapon().reload;
@@ -1087,6 +1139,7 @@ function renderGun(horizon){
   const s = H/240;
   ctx.save();
   ctx.translate(gx, gy);
+  ctx.rotate(slideK*0.28);          // 슬라이딩 시 총기 기울임
   ctx.scale(s, s);
   if (sniper){
     // 저격총: 긴 총열 + 스코프
@@ -1175,13 +1228,32 @@ function loop(t){
     const mlen = Math.hypot(fw, st);
     if (mlen > 1){ fw/=mlen; st/=mlen; }
     player.moving = mlen > 0.1;
-    const SPD = 3.1 * (player.scoped ? 0.45 : 1);
-    if (player.moving){
-      const dx = (Math.cos(player.dir)*fw - Math.sin(player.dir)*st) * SPD * dt;
-      const dy = (Math.sin(player.dir)*fw + Math.cos(player.dir)*st) * SPD * dt;
-      moveWithCollision(player, player.x+dx, player.y+dy, 0.22);
-      player.bobT += dt; player.bob = Math.min(1, player.bob + dt*6);
-    } else player.bob = Math.max(0, player.bob - dt*8);
+    // --- 점프 물리 ---
+    if (!player.grounded){
+      player.vz -= 6*dt;
+      player.z += player.vz*dt;
+      if (player.z <= 0){ player.z = 0; player.vz = 0; player.grounded = true; sfx.land(); }
+    }
+    // --- 슬라이딩 / 일반 이동 ---
+    player.slideCd = Math.max(0, player.slideCd - dt);
+    if (player.slideT > 0){
+      player.slideT -= dt;
+      const k = Math.pow(Math.max(0, player.slideT/SLIDE_DUR), 0.55);   // 감속 곡선
+      const sspd = 6.8 * k;
+      moveWithCollision(player, player.x + player.slideVx*sspd*dt,
+                                player.y + player.slideVy*sspd*dt, 0.22);
+      player.moving = true;
+      player.bob = Math.max(0, player.bob - dt*8);
+    } else {
+      const SPD = 3.1 * (player.scoped ? 0.45 : 1);
+      if (player.moving){
+        const dx = (Math.cos(player.dir)*fw - Math.sin(player.dir)*st) * SPD * dt;
+        const dy = (Math.sin(player.dir)*fw + Math.cos(player.dir)*st) * SPD * dt;
+        moveWithCollision(player, player.x+dx, player.y+dy, 0.22);
+        if (player.grounded){ player.bobT += dt; player.bob = Math.min(1, player.bob + dt*6); }
+      } else player.bob = Math.max(0, player.bob - dt*8);
+    }
+    document.getElementById('btnSlide').classList.toggle('cd', player.slideCd > 0);
 
     // --- 사격/장전/수류탄 ---
     player.fireCd -= dt;
@@ -1229,6 +1301,7 @@ function startGame(){
     hp:100, weapon:'rifle', ammoStore:{rifle:30, sniper:5},
     grenades:3, grenCd:0, scoped:false,
     reloading:0, fireCd:0, recoil:0, dead:false,
+    z:0, vz:0, grounded:true, slideT:0, slideCd:0,
   });
   enemies = []; pickups = []; grenades = []; explosions = [];
   allies = [];
@@ -1258,7 +1331,9 @@ requestAnimationFrame(loop);
 window.__dbg = () => ({
   player: {x:+player.x.toFixed(2), y:+player.y.toFixed(2), hp:player.hp,
            ammo:player.ammoStore[player.weapon], weapon:player.weapon,
-           grenades:player.grenades, scoped:player.scoped},
+           grenades:player.grenades, scoped:player.scoped,
+           z:+player.z.toFixed(3), grounded:player.grounded,
+           sliding:player.slideT>0, slideCd:+player.slideCd.toFixed(2)},
   enemies: enemies.map(e => ({x:+e.x.toFixed(2), y:+e.y.toFixed(2), hp:e.hp, dead:e.dead})),
   allies: allies.map(a => ({x:+a.x.toFixed(2), y:+a.y.toFixed(2), hp:a.hp, dead:a.dead})),
   grenades: grenades.length, explosions: explosions.length,
